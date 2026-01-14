@@ -1,0 +1,25 @@
+
+# Environment Variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Database & State
+*.db
+*.json
+!package.json
+!manifest.json
+
+# Keep config files if any, but ignore runtime jsons
+paper_account.json
+bot_status.json
+trailing_state.json
+
+# Logs
+*.log
+*.log.*
+
+# OS
+.DS_Store
