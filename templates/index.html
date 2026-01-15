@@ -4,8 +4,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="30">
+    <meta http-equiv="refresh" content="300"> <!-- Increased refresh time to avoid reloading while viewing charts -->
     <title>Upbit Trading Bot Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -93,6 +94,8 @@
             padding: 12px;
             text-align: left;
             border-bottom: 1px solid #eee;
+            white-space: nowrap;
+            /* Prevent wrap for horizontal scroll */
         }
 
         th {
@@ -130,6 +133,94 @@
             border-radius: 4px;
             font-size: 0.85rem;
         }
+
+        /* Modal CSS */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-content {
+            background-color: #fefefe;
+            margin: 5% auto;
+            padding: 20px;
+            border: 1px solid #888;
+            width: 90%;
+            height: 80%;
+            border-radius: 8px;
+            position: relative;
+        }
+
+        .close {
+            color: #aaa;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .close:hover,
+        .close:focus {
+            color: black;
+            text-decoration: none;
+            cursor: pointer;
+        }
+
+        .btn-chart {
+            background-color: #9b59b6;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+
+        .btn-chart:hover {
+            background-color: #8e44ad;
+        }
+
+        /* Mobile Optimization */
+        @media (max-width: 768px) {
+            body {
+                padding: 10px;
+            }
+
+            header {
+                flex-direction: column;
+                gap: 15px;
+                align-items: flex-start;
+            }
+
+            .container {
+                width: 100%;
+                padding: 0;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+                /* Stack vertically on mobile */
+            }
+
+            .card {
+                padding: 15px;
+                /* Slightly less padding */
+            }
+        }
+
+        .table-container {
+            width: 100%;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            /* Smooth scrolling on iOS */
+        }
     </style>
 </head>
 
@@ -141,225 +232,258 @@
         </header>
 
         <!-- Summary -->
-        <div class="card">
-            <h2>Asset Summary</h2>
-            <div class="stats-grid">
-                <div class="stat-item">
-                    <div class="stat-label">Total Assets (Est.)</div>
-                    <div class="stat-value">{{ "{:,.0f}".format(total_assets) }} KRW</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">Available KRW</div>
-                    <div class="stat-value">{{ "{:,.0f}".format(balance) }} KRW</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">Locked (Orders)</div>
-                    <div class="stat-value" style="color: #e67e22;">{{ "{:,.0f}".format(locked_funds) }} KRW</div>
+        <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin-bottom: 20px;">
+            <!-- Stats -->
+            <div class="card" style="margin-bottom: 0;">
+                <h2>Asset Summary</h2>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-label">Total Assets (Est.)</div>
+                        <div class="stat-value">{{ "{:,.0f}".format(total_assets) }} KRW</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Available KRW</div>
+                        <div class="stat-value">{{ "{:,.0f}".format(balance) }} KRW</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Locked (Orders)</div>
+                        <div class="stat-value" style="color: #e67e22;">{{ "{:,.0f}".format(locked_funds) }} KRW</div>
+                    </div>
                 </div>
             </div>
+
+            <!-- Chart -->
+            <div class="card"
+                style="margin-bottom: 0; display: flex; justify-content: center; align-items: center; position: relative;">
+                <canvas id="assetChart"></canvas>
+            </div>
         </div>
+
+        <!-- Mobile Hack: Force grid to stack on mobile via style block above or specific media query override if inline styles persist -->
+        <!-- Since I used inline style for grid, adding a specific style block for it -->
+        <style>
+            @media (max-width: 768px) {
+                div[style*="grid-template-columns: 2fr 1fr"] {
+                    grid-template-columns: 1fr !important;
+                }
+            }
+        </style>
 
         <!-- Strategy Status -->
         <div class="card">
             <h2>Market Watch & Strategy Status</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Market</th>
-                        <th>Current Price</th>
-                        <th>Target Price</th>
-                        <th>MA5</th>
-                        <th>Vol (ATR%)</th>
-                        <th>K</th>
-                        <th>Condition</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for m, s in bot_status.items() %}
-                    <tr>
-                        <td><strong>{{ m }}</strong></td>
-                        <td>{{ s.current_price | format_price }}</td>
-                        <td>{{ s.target_price | format_price }}</td>
-                        <td>{{ s.ma5 | format_price }}</td>
-                        <td>{{ "{:.2f}%".format(s.vol_pct) }}</td>
-                        <td>{{ "{:.2f}".format(s.k) }}</td>
-                        <td>
-                            {% if s.condition == 'BUY_SIGNAL_VB' %}
-                            <span style="color: #27ae60; font-weight: bold;">BUY SIGNAL</span>
-                            {% elif s.condition == 'WAIT' %}
-                            <span style="color: #95a5a6;">WAITING</span>
-                            {% elif s.condition == 'PUMP_DETECTED' %}
-                            <span style="color: #e74c3c; font-weight: bold;">PUMP SKIP</span>
-                            {% else %}
-                            {{ s.condition }}
-                            {% endif %}
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="7" style="text-align:center; color:#999;">Waiting for bot data...</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Market</th>
+                            <th>Current Price</th>
+                            <th>Target Price</th>
+                            <th>MA5</th>
+                            <th>Vol (ATR%)</th>
+                            <th>K</th>
+                            <th>Condition</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for m, s in bot_status.items() %}
+                        <tr>
+                            <td><strong>{{ m }}</strong></td>
+                            <td>{{ s.current_price | format_price }}</td>
+                            <td>{{ s.target_price | format_price }}</td>
+                            <td>{{ s.ma5 | format_price }}</td>
+                            <td>{{ "{:.2f}%".format(s.vol_pct) }}</td>
+                            <td>{{ "{:.2f}".format(s.k) }}</td>
+                            <td>
+                                {% if s.condition == 'BUY_SIGNAL_VB' %}
+                                <span style="color: #27ae60; font-weight: bold;">BUY SIGNAL</span>
+                                {% elif s.condition == 'WAIT' %}
+                                <span style="color: #95a5a6;">WAITING</span>
+                                {% elif s.condition == 'PUMP_DETECTED' %}
+                                <span style="color: #e74c3c; font-weight: bold;">PUMP SKIP</span>
+                                {% else %}
+                                {{ s.condition }}
+                                {% endif %}
+                            </td>
+                            <td>
+                                <button class="btn-chart" onclick="openChart('{{ m }}')">📊 Chart</button>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="8" style="text-align:center; color:#999;">Waiting for bot data...</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
         <!-- Holdings -->
         <div class="card">
             <h2>Holdings</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Market</th>
-                        <th>Volume</th>
-                        <th>Avg Price</th>
-                        <th>Current Price</th>
-                        <th>Value (KRW)</th>
-                        <th>PnL</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for h in holdings %}
-                    <tr>
-                        <td>{{ h.market }}</td>
-                        <td>{{ "{:.4f}".format(h.volume) }}</td>
-                        <td>{{ h.avg_price | format_price }}</td>
-                        <td>{{ h.current_price | format_price }}</td>
-                        <td>{{ "{:,.0f}".format(h.value) }}</td>
-                        <td class="{{ 'pnl-pos' if h.pnl >= 0 else 'pnl-neg' }}">
-                            {{ "{:+.2f}%".format(h.pnl) }}
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="6" style="text-align:center; color:#999;">No holdings currently.</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Market</th>
+                            <th>Volume</th>
+                            <th>Avg Price</th>
+                            <th>Current Price</th>
+                            <th>Value (KRW)</th>
+                            <th>PnL</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for h in holdings %}
+                        <tr>
+                            <td>{{ h.market }}</td>
+                            <td>{{ "{:.4f}".format(h.volume) }}</td>
+                            <td>{{ h.avg_price | format_price }}</td>
+                            <td>{{ h.current_price | format_price }}</td>
+                            <td>{{ "{:,.0f}".format(h.value) }}</td>
+                            <td class="{{ 'pnl-pos' if h.pnl >= 0 else 'pnl-neg' }}">
+                                {{ "{:+.2f}%".format(h.pnl) }}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="6" style="text-align:center; color:#999;">No holdings currently.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
         <!-- Coin Performance -->
         <div class="card">
             <h2>Coin Performance History (Lifetime)</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Market</th>
-                        <th>Trades</th>
-                        <th>Win Rate</th>
-                        <th>Realized PnL</th>
-                        <th>Unrealized PnL</th>
-                        <th>Net Profit (KRW)</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for p in performance %}
-                    <tr>
-                        <td style="font-weight: bold; color: #34495e;">{{ p.market }}</td>
-                        <td>{{ p.trade_count }}</td>
-                        <td>
-                            {% if p.trade_count > 0 %}
-                            {{ "{:.1f}%".format(p.win_rate) }}
-                            {% else %}
-                            -
-                            {% endif %}
-                        </td>
-                        <td class="{{ 'pnl-pos' if p.realized_pnl >= 0 else 'pnl-neg' }}">
-                            {{ "{:,.0f}".format(p.realized_pnl) }}
-                        </td>
-                        <td class="{{ 'pnl-pos' if p.unrealized_pnl >= 0 else 'pnl-neg' }}">
-                            {{ "{:,.0f}".format(p.unrealized_pnl) }}
-                        </td>
-                        <td class="{{ 'pnl-pos' if p.total_pnl >= 0 else 'pnl-neg' }}" style="font-size: 1.1em;">
-                            {{ "{:+.0f}".format(p.total_pnl) }} KRW
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="6" style="text-align:center; color:#999;">No performance data available.</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Market</th>
+                            <th>Trades</th>
+                            <th>Win Rate</th>
+                            <th>Realized PnL</th>
+                            <th>Unrealized PnL</th>
+                            <th>Net Profit (KRW)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for p in performance %}
+                        <tr>
+                            <td style="font-weight: bold; color: #34495e;">{{ p.market }}</td>
+                            <td>{{ p.trade_count }}</td>
+                            <td>
+                                {% if p.trade_count > 0 %}
+                                {{ "{:.1f}%".format(p.win_rate) }}
+                                {% else %}
+                                -
+                                {% endif %}
+                            </td>
+                            <td class="{{ 'pnl-pos' if p.realized_pnl >= 0 else 'pnl-neg' }}">
+                                {{ "{:,.0f}".format(p.realized_pnl) }}
+                            </td>
+                            <td class="{{ 'pnl-pos' if p.unrealized_pnl >= 0 else 'pnl-neg' }}">
+                                {{ "{:,.0f}".format(p.unrealized_pnl) }}
+                            </td>
+                            <td class="{{ 'pnl-pos' if p.total_pnl >= 0 else 'pnl-neg' }}" style="font-size: 1.1em;">
+                                {{ "{:+.0f}".format(p.total_pnl) }} KRW
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="6" style="text-align:center; color:#999;">No performance data available.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
         <!-- Open Orders -->
         <div class="card">
             <h2>Open Orders (Locked)</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Time</th>
-                        <th>Market</th>
-                        <th>Side</th>
-                        <th>Order Price</th>
-                        <th>Volume</th>
-                        <th>Locked/Value</th>
-                        <th>Current Price</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for o in open_orders %}
-                    <tr>
-                        <td>{{ o.created_at.split('.')[0] }}</td>
-                        <td>{{ o.market }}</td>
-                        <td><span class="side-{{ o.side }}">{{ o.side.upper() }}</span></td>
-                        <td>{{ o.price | format_price }}</td>
-                        <td>{{ "{:.4f}".format(o.volume) }}</td>
-                        <td>{{ "{:,.0f}".format(o.locked) }}</td>
-                        <td>{{ o.current_price | format_price }}</td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="7" style="text-align:center; color:#999;">No open orders.</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Market</th>
+                            <th>Side</th>
+                            <th>Order Price</th>
+                            <th>Volume</th>
+                            <th>Locked/Value</th>
+                            <th>Current Price</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for o in open_orders %}
+                        <tr>
+                            <td>{{ o.created_at.split('.')[0] }}</td>
+                            <td>{{ o.market }}</td>
+                            <td><span class="side-{{ o.side }}">{{ o.side.upper() }}</span></td>
+                            <td>{{ o.price | format_price }}</td>
+                            <td>{{ "{:.4f}".format(o.volume) }}</td>
+                            <td>{{ "{:,.0f}".format(o.locked) }}</td>
+                            <td>{{ o.current_price | format_price }}</td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="7" style="text-align:center; color:#999;">No open orders.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
         <!-- Recent Trades -->
         <div class="card">
             <h2>Recent Trades</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Time</th>
-                        <th>Market</th>
-                        <th>Side</th>
-                        <th>Volume</th>
-                        <th>Price</th>
-                        <th>Total</th>
-                        <th>PnL</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for t in trades %}
-                    <tr>
-                        <td>{{ t.timestamp.split('.')[0] }}</td>
-                        <td>{{ t.market }}</td>
-                        <td><span class="side-{{ t.side }}">{{ t.side.upper() }}</span></td>
-                        <td>{{ "{:.4f}".format(t.volume) }}</td>
-                        <td>{{ t.price | format_price }}</td>
-                        <td>{{ "{:,.0f}".format(t.total) }}</td>
-                        <td>
-                            {% if t.side == 'ask' and t.pnl is not none %}
-                            <span class="{{ 'pnl-pos' if t.pnl >= 0 else 'pnl-neg' }}">
-                                {{ "{:,.0f}".format(t.pnl) }} ({{ "{:+.2f}%".format(t.pnl_percent) }})
-                            </span>
-                            {% else %}
-                            -
-                            {% endif %}
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="7" style="text-align:center; color:#999;">No trades recorded yet.</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Market</th>
+                            <th>Side</th>
+                            <th>Volume</th>
+                            <th>Price</th>
+                            <th>Total</th>
+                            <th>PnL</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for t in trades %}
+                        <tr>
+                            <td>{{ t.timestamp.split('.')[0] }}</td>
+                            <td>{{ t.market }}</td>
+                            <td><span class="side-{{ t.side }}">{{ t.side.upper() }}</span></td>
+                            <td>{{ "{:.4f}".format(t.volume) }}</td>
+                            <td>{{ t.price | format_price }}</td>
+                            <td>{{ "{:,.0f}".format(t.total) }}</td>
+                            <td>
+                                {% if t.side == 'ask' and t.pnl is not none %}
+                                <span class="{{ 'pnl-pos' if t.pnl >= 0 else 'pnl-neg' }}">
+                                    {{ "{:,.0f}".format(t.pnl) }} ({{ "{:+.2f}%".format(t.pnl_percent) }})
+                                </span>
+                                {% else %}
+                                -
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="7" style="text-align:center; color:#999;">No trades recorded yet.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
 
             <div style="margin-top: 20px; text-align: center;">
                 {% if total_pages > 1 %}
@@ -377,6 +501,104 @@
             </div>
         </div>
     </div>
+
+    <!-- Chart Modal -->
+    <div id="chartModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeChart()">&times;</span>
+            <div id="tradingview_widget" style="height: 100%; width: 100%;"></div>
+        </div>
+    </div>
+
+    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+    <script>
+        // --- Asset Allocation Chart ---
+        const ctx = document.getElementById('assetChart').getContext('2d');
+
+        // Prepare Data from Jinja
+        const balance = {{ balance }};
+        const holdingsData = [
+            {% for h in holdings %}
+        { market: "{{ h.market }}", value: {{ h.value }} },
+        {% endfor %}
+        ];
+
+        // Format for Chart
+        let labels = ["KRW (Cash)"];
+        let data = [balance];
+        let colors = ["#bdc3c7"]; // Grey for cash
+
+        const coinColors = ["#f1c40f", "#e67e22", "#e74c3c", "#9b59b6", "#3498db", "#2ecc71", "#1abc9c"];
+
+        holdingsData.forEach((h, index) => {
+            labels.push(h.market.replace('KRW-', ''));
+            data.push(h.value);
+            colors.push(coinColors[index % coinColors.length]);
+        });
+
+        const assetChart = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: labels,
+                datasets: [{
+                    data: data,
+                    backgroundColor: colors,
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'right',
+                        labels: { boxWidth: 12 }
+                    },
+                    title: {
+                        display: true,
+                        text: 'Asset Allocation'
+                    }
+                }
+            }
+        });
+
+        // --- TradingView Widget ---
+        function openChart(market) {
+            document.getElementById('chartModal').style.display = "block";
+
+            // Convert KRW-BTC to UPBIT:BTCKRW format roughly (TradingView uses specific symbols)
+            // Upbit map: KRW-BTC -> UPBIT:BTCKRW
+            const symbol = "UPBIT:" + market.replace('KRW-', '') + "KRW";
+
+            new TradingView.widget({
+                "width": "100%",
+                "height": "100%",
+                "symbol": symbol,
+                "interval": "15",
+                "timezone": "Asia/Seoul",
+                "theme": "light",
+                "style": "1",
+                "locale": "en",
+                "toolbar_bg": "#f1f3f6",
+                "enable_publishing": false,
+                "allow_symbol_change": true,
+                "container_id": "tradingview_widget"
+            });
+        }
+
+        function closeChart() {
+            document.getElementById('chartModal').style.display = "none";
+            document.getElementById('tradingview_widget').innerHTML = ""; // Clear
+        }
+
+        // Close modal when clicking outside
+        window.onclick = function (event) {
+            const modal = document.getElementById('chartModal');
+            if (event.target == modal) {
+                closeChart();
+            }
+        }
+    </script>
 </body>
 
 </html>

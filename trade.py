@@ -117,8 +117,17 @@ def send_request(method, endpoint, params=None, auth=False):
         return None
 
 def get_current_price(market):
-    data = send_request('GET', '/v1/ticker', {'markets': market})
-    return data[0]['trade_price'] if data else None
+    return get_current_prices([market]).get(market)
+
+def get_current_prices(markets):
+    if not markets: return {}
+    joined_markets = ",".join(markets)
+    data = send_request('GET', '/v1/ticker', {'markets': joined_markets})
+    prices = {}
+    if data:
+        for item in data:
+            prices[item['market']] = float(item['trade_price'])
+    return prices
 
 def get_daily_ohlcv(market, count=21):
     return send_request('GET', '/v1/candles/days', {'market': market, 'count': count})
@@ -534,6 +543,7 @@ class VolatilityBreakoutBot:
                 if spendable > 5000:
                     print(f"[{self.market}] [VB] BUY (Bud: {budget:,.0f}, Vol%: {vol_pct*100:.1f}%)")
                     if self.account.buy_market(self.market, spendable, current_price):
+                        trailing_manager.reset(self.market) # Reset previous state (if any)
                         trailing_manager.update_high(self.market, current_price) # Init Trailing
 
             # 2. Mean Reversion (Sub)
@@ -552,6 +562,7 @@ class VolatilityBreakoutBot:
                          if spendable > 5000:
                              print(f"[{self.market}] [MR] BUY (Dip)")
                              if self.account.buy_market(self.market, spendable, current_price):
+                                 trailing_manager.reset(self.market)
                                  trailing_manager.update_high(self.market, current_price)
                                  status['condition'] = 'BUY_MR'
 
@@ -592,7 +603,7 @@ class VolatilityBreakoutBot:
 
             # Optional: EOD Sell
             if current_time.hour == 8 and current_time.minute >= 59:
-                 print(f"[{self.market}] END OF DAY SELL")
+                 print(f"[{self.market}] END OF DAY SELL (09:00 KST Daily Close)")
                  self.account.sell_market(self.market, pos['volume'], current_price)
                  trailing_manager.reset(self.market)
                  status['condition'] = 'SELL_EOD'
@@ -776,17 +787,15 @@ def main():
         try:
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Tick...")
 
-            prices = {}
-            for market in STRATEGIES.keys():
-                p = get_current_price(market)
-                if p: prices[market] = p
+            # Batch fetch prices
+            prices = get_current_prices(list(bots.keys()))
 
-                bot_stats = {}
+            bot_stats = {}
             for market, bot in bots.items():
                 if market not in prices: continue
                 # Always fetch 50 for indicators
                 candles = get_daily_ohlcv(market, count=50)
-                time.sleep(0.5)
+                time.sleep(0.2) # Throttle candle API calls (5 req/sec is safe)
 
                 status = bot.run(prices[market], candles)
                 bot_stats[market] = status
@@ -805,7 +814,7 @@ def main():
                     val = pos['volume'] * prices.get(m, 0)
                     print(f"  {m}: {pos['volume']:.4f} ({val:,.0f} KRW)")
 
-            time.sleep(10)
+            time.sleep(30) # Increased sleep to avoid 429
 
         except KeyboardInterrupt:
             print("Stopping...")
