@@ -284,6 +284,11 @@ def index():
         if total_finished_trades > 0:
             win_rate = (h_stat['win'] / total_finished_trades) * 100
 
+        # Filter out "ghost" executions (phantom sells with no PnL info and no current holdings)
+        # Condition: Trade Count > 0 AND Total PnL == 0 AND Current Volume == 0 AND Win Rate == 0
+        if h_stat['cnt'] > 0 and total_pnl == 0 and current_vol == 0 and total_finished_trades == 0:
+            continue
+
         performance.append({
             'market': m,
             'realized_pnl': realized,

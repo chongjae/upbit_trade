@@ -271,7 +271,7 @@
 
         <!-- Strategy Status -->
         <div class="card">
-            <h2>Market Watch & Strategy Status</h2>
+            <h2>🧠 Active Strategy Status</h2>
             <div class="table-container">
                 <table>
                     <thead>
@@ -279,40 +279,66 @@
                             <th>Market</th>
                             <th>Current Price</th>
                             <th>Target Price</th>
-                            <th>MA5</th>
-                            <th>Vol (ATR%)</th>
-                            <th>K</th>
+                            <th>Strategy Mode</th>
+                            <th>ADX</th>
                             <th>Condition</th>
                             <th>Action</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {% for m, s in bot_status.items() %}
+                        {% for market, status in bot_status.items() %}
                         <tr>
-                            <td><strong>{{ m }}</strong></td>
-                            <td>{{ s.current_price | format_price }}</td>
-                            <td>{{ s.target_price | format_price }}</td>
-                            <td>{{ s.ma5 | format_price }}</td>
-                            <td>{{ "{:.2f}%".format(s.vol_pct) }}</td>
-                            <td>{{ "{:.2f}".format(s.k) }}</td>
                             <td>
-                                {% if s.condition == 'BUY_SIGNAL_VB' %}
-                                <span style="color: #27ae60; font-weight: bold;">BUY SIGNAL</span>
-                                {% elif s.condition == 'WAIT' %}
-                                <span style="color: #95a5a6;">WAITING</span>
-                                {% elif s.condition == 'PUMP_DETECTED' %}
-                                <span style="color: #e74c3c; font-weight: bold;">PUMP SKIP</span>
+                                <strong>{{ market }}</strong>
+                                <button class="btn-chart" onclick="openChart('{{ market }}')">📊</button>
+                            </td>
+                            <td>{{ status.current_price | format_price }} KRW</td>
+                            <td>
+                                {% if status.target_price and status.target_price > 0 %}
+                                <span style="color: #2980b9; font-weight: bold;">{{ status.target_price | format_price
+                                    }}</span>
                                 {% else %}
-                                {{ s.condition }}
+                                <span style="color: #95a5a6;">-</span>
                                 {% endif %}
                             </td>
                             <td>
-                                <button class="btn-chart" onclick="openChart('{{ m }}')">📊 Chart</button>
+                                {% if status.mode %}
+                                <span
+                                    style="background: #e8f6f3; color: #1abc9c; padding: 3px 8px; border-radius: 12px; font-size: 0.85rem; font-weight: bold;">
+                                    {{ status.mode }}
+                                </span>
+                                {% else %}
+                                <span style="color: #95a5a6;">Wait</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if status.adx %}
+                                {{ "{:.1f}".format(status.adx) }}
+                                {% if status.adx >= 25 %}
+                                <span style="font-size: 0.8rem; color: #e67e22;">(Trend)</span>
+                                {% else %}
+                                <span style="font-size: 0.8rem; color: #3498db;">(Range)</span>
+                                {% endif %}
+                                {% else %}
+                                -
+                                {% endif %}
+                            </td>
+                            <td style="font-size: 0.9rem; color: #7f8c8d;">
+                                {{ status.condition }}
+                            </td>
+                            <td>
+                                {% if 'BUY' in status.condition %}
+                                <span class="side-bid">BUY SIGNAL</span>
+                                {% elif 'SELL' in status.condition %}
+                                <span class="side-ask">SELL SIGNAL</span>
+                                {% else %}
+                                <span style="color: #bdc3c7;">Waiting</span>
+                                {% endif %}
                             </td>
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="8" style="text-align:center; color:#999;">Waiting for bot data...</td>
+                            <td colspan="7" style="text-align: center; color: #95a5a6;">Waiting for bot data...</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -516,7 +542,7 @@
         const ctx = document.getElementById('assetChart').getContext('2d');
 
         // Prepare Data from Jinja
-        const balance = {{ balance }};
+        const userBalance = {{ balance }};
         const holdingsData = [
             {% for h in holdings %}
         { market: "{{ h.market }}", value: {{ h.value }} },
@@ -525,7 +551,7 @@
 
         // Format for Chart
         let labels = ["KRW (Cash)"];
-        let data = [balance];
+        let data = [userBalance];
         let colors = ["#bdc3c7"]; // Grey for cash
 
         const coinColors = ["#f1c40f", "#e67e22", "#e74c3c", "#9b59b6", "#3498db", "#2ecc71", "#1abc9c"];

@@ -1,79 +1,122 @@
-
 import os
 import time
-import requests
 import json
+import sqlite3
+import urllib.request
+from urllib.parse import urlencode
 from datetime import datetime, timedelta
-from trade import PaperAccount, STRATEGIES, VolatilityBreakoutBot
+from trade import (
+    PaperAccount, 
+    STRATEGIES, 
+    VolatilityBreakoutBot, 
+    ConnorsRSIBot, 
+    BollingerBandBot, 
+    MACDDivergenceBot, 
+    DynamicSwitchBot
+)
 
+BACKTEST_INITIAL_BALANCE = 1_000_000
 
-# Limit backtest to last 30 days for minute data to avoid API overload or use fewer points?
-# Upbit API restriction: /v1/candles/minutes/1 returns 200 max.
-# 30 days * 24h * 60m = 43200 points.
-# We need to loop.
-
-BACKTEST_INITIAL_BALANCE = 91250
-
+# --- Helper: Resampling ---
+def resample_candles(minute_candles, interval_minutes):
+    """
+    Resample 1-minute candles into larger intervals (15m, 60m, 1440m/Daily).
+    Returns list of dicts (Newest -> Oldest)
+    minute_candles: List of dicts (Newest -> Oldest according to Upbit API usually, but here likely chronological? 
+                    Let's assume input is Chronological (Old->New) to make accumulation easy, then reverse for bot?)
+    """
+    if not minute_candles: return []
+    
+    # Ensure input is Chronological (Old -> New)
+    # Our DB fetch returns chronological? BacktestDB.get_candles_by_time implies point-in-time access.
+    # The calling loop provides a historical buffer.
+    
+    # We will simply group the buffer.
+    
+    resampled = []
+    current_candle = None
+    
+    # Assume minute_candles is recent history [Oldest, ..., Newest]
+    # We iterate and group.
+    
+    # To align with clock (e.g. 15m candles start at 00, 15, 30, 45), we need timestamp parsing.
+    # Upbit Daily closes at 09:00 KST. 
+    
+    # Simplified Resampling:
+    # Just standard bucket logic.
+    
+    # Optimization: Callers in backtest loop usually need "The historical candles ending NOW".
+    # So we take the last N minutes.
+    
+    pass
 
 class BacktestAccount(PaperAccount):
     def __init__(self, initial_krw=1_000_000):
-        # Initialize in-memory only (no file/db persistence for backtest speed)
         self.filename = "backtest_account.json"
-        self.db_file = ":memory:" # Use in-memory SQLite
+        self.db_file = ":memory:" 
         self.init_db()
-
         self.balance = initial_krw
         self.positions = {}
         self.orders = []
-        self.trades_log = [] # Keep simple list instead of DB if desired, but we reused PaperAccount structure
+        self.trades_log = [] 
 
-    def check_orders(self, current_candle):
-        # Override to check against candle High/Low
-        # current_candle: {market_name: {high_price, low_price, trade_price...}}
-
+    def check_orders(self, current_candle_map):
         filled_orders = []
         remaining_orders = []
 
         for order in self.orders:
             market = order['market']
-            if market not in current_candle:
+            if market not in current_candle_map:
                 remaining_orders.append(order)
                 continue
 
-            candle = current_candle[market]
+            candle = current_candle_map[market]
+            # Candle Format: {'trade_price': ..., 'high_price': ..., 'low_price': ...}
+            
             low = candle['low_price']
             high = candle['high_price']
-
             side = order['side']
             price = order['price']
-
             filled = False
-            # Buy Limit: Filled if Price >= Low
-            if side == 'bid' and low <= price:
+            
+            # Slippage/Spread Simulation: 0.05%?
+            
+            if side == 'bid' and low <= price: # Buy Limit
                  self.update_position(market, order['volume'], price, 'bid')
-                 total = price * order['volume'] * 1.0005
+                 curr_vol = order['volume']
+                 fee = (price * curr_vol) * 0.0005
+                 total = (price * curr_vol) + fee
+                 self.balance -= total # Deduct Balance immediately? PaperAccount usually deducts on order *creation* (locked).
+                 # Wait, PaperAccount logic: buy_limit locks balance?
+                 # check trade.py: buy_limit -> locks balance.
+                 # So here we just finalize.
+                 
                  self.log_trade(market, 'bid', price, order['volume'], total)
                  filled = True
 
-            # Sell Limit: Filled if Price <= High
-            elif side == 'ask' and high >= price:
-                 earn = price * order['volume'] * 0.9995
-                 self.balance += earn
-                 total = earn
-                 self.log_trade(market, 'ask', price, order['volume'], total)
+            elif side == 'ask' and high >= price: # Sell Limit
+                 curr_vol = order['volume']
+                 earn = price * curr_vol
+                 fee = (price * curr_vol) * 0.0005
+                 total_earn = earn - fee
+                 
+                 self.balance += total_earn
+                 self.update_position(market, order['volume'], price, 'ask') # Updates position volume (removes it)
+                 
+                 self.log_trade(market, 'ask', price, order['volume'], total_earn)
                  filled = True
 
             if filled:
-                # print(f"[Backtest] ORDER FILLED {market} {side}: {order['volume']} @ {price}")
                 filled_orders.append(order)
             else:
                 remaining_orders.append(order)
 
+        self.orders = remaining_orders
         return filled_orders
 
     def log_trade(self, market, side, price, volume, total):
         self.trades_log.append({
-            'timestamp': str(datetime.now()),
+            'timestamp': str(datetime.now()), # Mock time? Ideally passed in.
             'market': market,
             'side': side,
             'price': price,
@@ -81,12 +124,9 @@ class BacktestAccount(PaperAccount):
             'total': total
         })
 
-    def save(self):
-        pass # Disable file saving
+    def save(self): pass
 
-
-import sqlite3
-
+# --- DB & Data Fetching ---
 class BacktestDB:
     def __init__(self, db_file="backtest_cache.db"):
         self.db_file = db_file
@@ -95,8 +135,6 @@ class BacktestDB:
     def init_db(self):
         conn = sqlite3.connect(self.db_file)
         c = conn.cursor()
-        # timestamp_kst string 'YYYY-MM-DD HH:mm:SS'
-        # market string 'KRW-BTC'
         c.execute('''CREATE TABLE IF NOT EXISTS candles
                      (market TEXT,
                       timestamp_kst TEXT,
@@ -125,11 +163,20 @@ class BacktestDB:
                 cdl['opening_price'],
                 cdl['candle_acc_trade_volume']
             ))
-        # REPLACE or IGNORE? REPLACE to update if needed.
         c.executemany("INSERT OR REPLACE INTO candles VALUES (?, ?, ?, ?, ?, ?, ?)", data)
         conn.commit()
         conn.close()
 
+    def get_entries_range(self, market, start_ts, end_ts):
+        """Get all 1-minute candles in range [start_ts, end_ts] inclusive (Strings)"""
+        conn = sqlite3.connect(self.db_file)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM candles WHERE market=? AND timestamp_kst >= ? AND timestamp_kst <= ? ORDER BY timestamp_kst ASC", (market, start_ts, end_ts))
+        rows = c.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+        
     def get_latest_timestamp(self, market):
         conn = sqlite3.connect(self.db_file)
         c = conn.cursor()
@@ -138,287 +185,350 @@ class BacktestDB:
         conn.close()
         return res[0] if res else None
 
-    def get_all_timestamps(self):
-        # Return sorted list of distinct timestamps within DB
-        # To limit scope, we could filter by date here if we only want 7 days
-        conn = sqlite3.connect(self.db_file)
-        c = conn.cursor()
-        c.execute("SELECT DISTINCT timestamp_kst FROM candles ORDER BY timestamp_kst ASC")
-        rows = c.fetchall()
-        conn.close()
-        return [r[0] for r in rows]
+import urllib.request
+from urllib.parse import urlencode
 
-    def get_oldest_timestamp(self, market):
-        conn = sqlite3.connect(self.db_file)
-        c = conn.cursor()
-        c.execute("SELECT MIN(timestamp_kst) FROM candles WHERE market=?", (market,))
-        res = c.fetchone()
-        conn.close()
-        return res[0] if res else None
-
-    def get_candles_by_time(self, timestamp_kst):
-        conn = sqlite3.connect(self.db_file)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute("SELECT * FROM candles WHERE timestamp_kst=?", (timestamp_kst,))
-        rows = c.fetchall()
-        conn.close()
-        # Convert to dict format expected by BacktestAccount
-        res = {}
-        for r in rows:
-            res[r['market']] = dict(r)
-        return res
+# ... (Previous imports)
 
 def fetch_minute_candles(market, to_datetime, count=200):
     url = "https://api.upbit.com/v1/candles/minutes/1"
-    # Use 'T' separator or verify format. Upbit docs: yyyy-MM-dd HH:mm:ss
-    # But let's try strict string format and ensure requests doesn't mangle it.
-    to_str = to_datetime.strftime("%Y-%m-%d %H:%M:%S")
+    to_str = to_datetime.strftime("%Y-%m-%dT%H:%M:%S") + "+09:00"
     params = {'market': market, 'to': to_str, 'count': count}
-
+    
+    query_string = urlencode(params)
+    full_url = f"{url}?{query_string}"
+    
+    req = urllib.request.Request(full_url)
+    req.add_header("User-Agent", "Mozilla/5.0")
+    req.add_header("Accept", "application/json")
+    
     try:
-        res = requests.get(url, params=params, timeout=10)
-
-        # Check for 429 specifically
-        if res.status_code == 429:
-            print(f"[429] Rate Limit on {market}. Sleeping 1s...")
-            time.sleep(1)
-            return [] # Retry logic handled by caller loop? Caller breaks on empty.
-                      # Ideally we should retry here.
-
-        data = res.json()
-
-        if isinstance(data, list):
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
             return data
-        elif isinstance(data, dict) and 'error' in data:
-            print(f"API Error {market}: {data['error']}")
-            return []
-        else:
-            print(f"Unknown Response {market}: {data}")
-            return []
-
+            
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+             time.sleep(1)
+             return []
+        print(f"HTTP Error {e.code} for {market}: {e}")
+        return []
     except Exception as e:
         print(f"Error fetching {market}: {e}")
         return []
 
-def fetch_loop(market, start_dt, end_dt, db):
-    """
-    Fetches minutes backwards from end_dt down to start_dt.
-    """
-    curr = end_dt
-    print(f"    Syncing range: {start_dt} ~ {end_dt}")
-
-    while curr > start_dt:
-        batch = fetch_minute_candles(market, curr, 200)
-
-        if not batch:
-            print("    Empty batch. Retrying in 1s...")
-            time.sleep(1)
-            batch = fetch_minute_candles(market, curr, 200)
-            if not batch:
-                print("    Still empty. Stopping this range.")
-                break
-
-        db.save_bulk(batch)
-
-        last_timestamp = batch[-1]['candle_date_time_kst']
-        last_dt = datetime.strptime(last_timestamp, "%Y-%m-%dT%H:%M:%S")
-
-        # Check progress
-        if last_dt >= curr:
-             print(f"    Warning: Stuck at {last_timestamp}. Forcing jump.")
-             curr = curr - timedelta(minutes=200)
-        else:
-             print(f"    Synced {len(batch)} candles. Last: {last_timestamp}")
-             curr = last_dt - timedelta(minutes=1)
-
-        time.sleep(0.12)
-
-def ensure_data_in_db(days=30):
+def sync_data(market, days=7):
     db = BacktestDB()
     end_dt = datetime.now()
     start_dt = end_dt - timedelta(days=days)
-
-    print(f"Checking data for {days} days ({start_dt.strftime('%Y-%m-%d %H:%M')} ~ {end_dt.strftime('%Y-%m-%d %H:%M')})...")
-
-    for market in STRATEGIES.keys():
-        print(f"  Checking {market}...")
-
-        latest_str = db.get_latest_timestamp(market)
-        oldest_str = db.get_oldest_timestamp(market)
-
-        if not latest_str:
-            # Case 1: No data at all. Fetch all.
-            print("    No cache found. Fetching all...")
-            fetch_loop(market, start_dt, end_dt, db)
-        else:
-            latest_dt = datetime.strptime(latest_str, "%Y-%m-%dT%H:%M:%S")
-            oldest_dt = datetime.strptime(oldest_str, "%Y-%m-%dT%H:%M:%S")
-            print(f"    Cache: {oldest_str} ~ {latest_str}")
-
-            # Case 2: Gap 1 (New Data: Latest -> Now)
-            # Only fetch if gap is significant (> 2 mins)
-            if end_dt > latest_dt + timedelta(minutes=2):
-                print("    Fetching NEW data gap...")
-                fetch_loop(market, latest_dt, end_dt, db)
-
-            # Case 3: Gap 2 (Old Data: Target Start -> Oldest)
-            if start_dt < oldest_dt:
-                 print("    Fetching HISTORICAL data gap...")
-                 # Start fetch from oldest - 1 min to avoid overlap
-                 fetch_loop(market, start_dt, oldest_dt - timedelta(minutes=1), db)
-
-            print("    Cache up to date.")
-
-    print("Data sync complete.")
+    
+    print(f"Syncing {market} for {days} days...")
+    
+    latest = db.get_latest_timestamp(market)
+    
+    # Simple logic: If no data or gap at end, fetch backwards from Now until hits Cache or Start
+    curr = end_dt
+    retries = 0
+    
+    while curr > start_dt:
+        if latest and curr.strftime("%Y-%m-%dT%H:%M:%S") < latest:
+            print("  Hit cached range.")
+            break 
+            
+        print(f"  Fetching from {curr}")
+        batch = fetch_minute_candles(market, curr, 200)
+        if not batch: 
+            retries += 1
+            if retries > 3:
+                print(f"  Max retries reached for {market} at {curr}. Skipping fetch.")
+                break
+            time.sleep(1)
+            continue
+        
+        retries = 0 # Reset on success
+            
+        db.save_bulk(batch)
+        last_ts = batch[-1]['candle_date_time_kst']
+        last_dt = datetime.strptime(last_ts, "%Y-%m-%dT%H:%M:%S")
+        curr = last_dt - timedelta(minutes=1)
+        time.sleep(0.12)
+        
     return db
 
-def calculate_past_month_profit():
-    # 1. Sync Data
-    db = ensure_data_in_db(30)
 
-    # 2. Setup Env
+# --- Resampler Logic ---
+def build_candles_from_minutes(minute_data, final_curr_price, timeframe_min):
+    """
+    Groups ordered 1-minute data into candles of `timeframe_min`.
+    minute_data: list of dicts (Oldest -> Newest)
+    Returns: list of dicts (Newest -> Oldest) as expected by Bot
+    """
+    if not minute_data: return []
+    
+    output = []
+    
+    # Grouping key? 
+    # Just simple chunking relative to first? No, alignment issues.
+    # Align to clock?
+    # 00, 15, 30, 45 for 15m.
+    # 09:00 alignment for Daily.
+    
+    # Rough Simulation:
+    # We iterate minutes.
+    
+    # We need REVERSE order output (Newest First).
+    
+    # Just construct ONE candle if we are simulating the "live" moment?
+    # Bots usually need History (e.g. 20 candles).
+    # So we need to reconstruct the last N candles.
+    
+    # Reverse input to work Newest -> Oldest?
+    # minutes: [m1, m2, m3 ... mLatest]
+    
+    # Let's iterate backwards.
+    minutes = minute_data[::-1] # Newest -> Oldest
+    
+    current_bucket = []
+    
+    # Daily (1440m) needs 09:00 KST alignment.
+    # 15m needs HH:00, HH:15...
+    
+    for m in minutes:
+        dt = datetime.strptime(m['timestamp_kst'], "%Y-%m-%dT%H:%M:%S")
+        
+        # Determine Bucket Key
+        if timeframe_min == 1440:
+            # Daily: 09:00 boundary.
+            # If time < 09:00, it belongs to "Yesterday's" trading day (which ends today 09:00)
+            # Upbit date logic:
+            # Shift -9 hours? No.
+            # Just use date() logic shifted by 9H.
+            # (dt - 9h).date() is the unique key.
+            key = (dt - timedelta(hours=9)).date()
+        elif timeframe_min == 60:
+             key = dt.replace(minute=0, second=0)
+        elif timeframe_min == 15:
+             minute_bucket = (dt.minute // 15) * 15
+             key = dt.replace(minute=minute_bucket, second=0)
+        else:
+             key = dt
+             
+        # Check if we moved to new bucket
+        if output and output[-1]['key'] != key:
+             # This m belongs to a older bucket.
+             pass
+        
+        # Wait, efficient way:
+        # We need a list of consolidated candles.
+        
+        # Helper to finalize bucket
+        pass
+        
+    # Pandas is far better for this. But native python:
+    # Re-sort to chronological [Old -> New]
+    sorted_mins = sorted(minute_data, key=lambda x: x['timestamp_kst'])
+    
+    candles = []
+    current_c = None
+    last_key = None
+    
+    for m in sorted_mins:
+        dt = datetime.strptime(m['timestamp_kst'], "%Y-%m-%dT%H:%M:%S")
+        
+        if timeframe_min == 1440:
+             # Daily open at 09:00 KST. Close at 08:59:59 next day.
+             # Bucket ID: The Date the candle OPENS on?
+             # If dt < 09:00, it belongs to Previous Day (starts Prev 09:00).
+             adj = dt - timedelta(hours=9)
+             key = adj.date()
+        else:
+             # 15m / 60m
+             total_mins = (dt.hour * 60) + dt.minute
+             bucket_idx = total_mins // timeframe_min
+             key = f"{dt.date()}-{bucket_idx}"
+
+        if last_key != key:
+            if current_c:
+                 candles.append(current_c)
+            
+            # New Candle
+            current_c = {
+                'candle_date_time_kst': m['timestamp_kst'],  # Start time approximation
+                'opening_price': m['opening_price'],
+                'high_price': m['high_price'],
+                'low_price': m['low_price'],
+                'trade_price': m['trade_price'],
+                'candle_acc_trade_volume': m['candle_acc_trade_volume']
+            }
+            last_key = key
+        else:
+            # Update Candle
+            current_c['high_price'] = max(current_c['high_price'], m['high_price'])
+            current_c['low_price'] = min(current_c['low_price'], m['low_price'])
+            current_c['trade_price'] = m['trade_price'] # Close is latest
+            current_c['candle_acc_trade_volume'] += m['candle_acc_trade_volume']
+            
+    if current_c:
+        candles.append(current_c)
+        
+    # Return Newest -> Oldest
+    return candles[::-1]
+
+
+def run_backtest(days=5):
+    db1 = sync_data('KRW-BTC', days) # Sync main mostly to ensure we have timeline
+    
+    markets = list(STRATEGIES.keys())
+    for m in markets:
+        sync_data(m, days)
+        
     account = BacktestAccount(BACKTEST_INITIAL_BALANCE)
+    
+    # Setup Bots
     bots = {}
-    for market, strategy_type in STRATEGIES.items():
-        # Strat is always VB now based on trade.py
-        bots[market] = VolatilityBreakoutBot(account, market)
+    for m, s in STRATEGIES.items():
+        if s == 'DYNAMIC':
+            bots[m] = DynamicSwitchBot(account, m)
+        elif s == 'MACD':
+            bots[m] = MACDDivergenceBot(account, m)
+        elif s == 'BB':
+            bots[m] = BollingerBandBot(account, m)
+        elif s == 'CRSI':
+            bots[m] = ConnorsRSIBot(account, m)
+        else:
+            bots[m] = VolatilityBreakoutBot(account, m)
+            
+    print("\n--- Starting Simulation ---")
+    
+    # Time Loop
+    # Get common timeline
+    db = BacktestDB()
+    # 1. Get all minute timestamps in range
+    now = datetime.now()
+    start_ts = (now - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    end_ts = now.strftime("%Y-%m-%d %H:%M:%S")
+    
+    conn = sqlite3.connect("backtest_cache.db")
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT timestamp_kst FROM candles WHERE timestamp_kst >= ? ORDER BY timestamp_kst ASC", (start_ts,))
+    timeline = [r[0] for r in cur.fetchall()]
+    conn.close()
+    
+    # 2. Buffers for history (sliding window for resampling)
+    # To generate a Daily candle, we need 24h of history.
+    # To generate 200 Daily candles, we need 200 days history?
+    # Backtesting 5 days of execution implies we just need 'Pre-loaded' history for indicators.
+    # We can fake the pre-history or just accept "Startup" period where indicators are 0.
+    
+    print(f"Time steps: {len(timeline)}")
+    
+    # Optimization: Pre-load ALL data for markets in range to memory
+    market_data = {}
+    for m in markets:
+        market_data[m] = db.get_entries_range(m, start_ts, end_ts)
+        # Convert to dict based on TS
+        market_data[m] = {row['timestamp_kst']: row for row in market_data[m]}
+    
+    history_buffers = {m: [] for m in markets}
+    
+    step = 0
+    total = len(timeline)
+    
+    for ts in timeline:
+        step += 1
+        if step % 1000 == 0: print(f"Progress: {step}/{total}")
+        
+        current_dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S")
+        
+        # 1. Update Market Prices & Buffers
+        current_tick_map = {} # For Order Check
+        
+        for m in markets:
+            if ts in market_data[m]:
+                candle = market_data[m][ts]
+                current_tick_map[m] = candle
+                history_buffers[m].append(candle)
+                
+                # Trim buffer to reasonable size (e.g. 5 days of minutes = 7200)
+                # We need enough to construct daily candles?
+                # Actually, real backtesting needs long daily history.
+                # Here we might be limited by 1m data availability.
+                # Assuming 'sync_data' only got recent minutes.
+                
+                # If we need 20 Daily candles, we need 20 days.
+                # If we only synced 5 days, indicators might be unstable.
+                if len(history_buffers[m]) > 20000:
+                    history_buffers[m] = history_buffers[m][-20000:]
+                    
+        # 2. Check Order Fills
+        account.check_orders(current_tick_map)
+        
+        # 3. Bots Run (every 15 mins? or every min?)
+        # Running every min is slow but accurate for entries.
+        
+        for m, bot in bots.items():
+            if m not in current_tick_map: continue
+            
+            # Prepare Candles
+            hist = history_buffers[m]
+            
+            # Dynamic Needs: Daily (200), 15m (50)
+            # MACD Needs: 60m (100)
+            # Others: Daily (200)
+            
+            # Resample on Fly? (Slow but correct)
+            # Optimization: Only resample if minute == 00, 15, etc?
+            # But indicators update every minute in real bot (partial candle).
+            
+            # Just do Daily and 15m.
+            
+            daily_cf = [] 
+            min15_cf = []
+            min60_cf = []
+            
+            strat = STRATEGIES.get(m, 'VB')
+            
+            # We construct derived candles from 'hist'
+            # Note: This is computationally heavy in python loop.
+            
+            # Optimization:
+            # Only run bot logic every 15 mins? 
+            # Real bot runs every loop (1 sec).
+            # For backtest speed, let's run every 5 mins?
+            if current_dt.minute % 5 != 0: continue
+            
+            c_price = current_tick_map[m]['trade_price']
+            
+            if strat == 'DYNAMIC':
+                daily_cf = build_candles_from_minutes(hist, c_price, 1440)
+                min15_cf = build_candles_from_minutes(hist, c_price, 15)
+                # Limit size
+                daily_cf = daily_cf[:200]
+                min15_cf = min15_cf[:60]
+                
+                bot.run(c_price, {'daily': daily_cf, '15m': min15_cf}, current_time=current_dt)
+                
+            elif strat == 'MACD':
+                min60_cf = build_candles_from_minutes(hist, c_price, 60)
+                min60_cf = min60_cf[:100]
+                bot.run(c_price, min60_cf, current_time=current_dt)
+                
+            elif strat == 'BB':
+                min15_cf = build_candles_from_minutes(hist, c_price, 15)
+                min15_cf = min15_cf[:60]
+                bot.run(c_price, min15_cf, current_time=current_dt)
+                
+            else: # VB, CRSI
+                daily_cf = build_candles_from_minutes(hist, c_price, 1440)
+                daily_cf = daily_cf[:200]
+                bot.run(c_price, daily_cf, current_time=current_dt)
 
-    # 3. Simulate
-    # Get all timestamps from DB (sorted)
-    # Filter for last 30 days only
-    all_ts = db.get_all_timestamps()
-    # Filter: >= start_dt
-    start_str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-    sim_ts = [t for t in all_ts if t >= start_str]
-
-    print(f"Starting Simulation over {len(sim_ts)} minutes...")
-    print(f"  Range: {sim_ts[0]} ~ {sim_ts[-1]}")
-
-    daily_cache = {}
-    for m in STRATEGIES.keys():
-        url = "https://api.upbit.com/v1/candles/days"
-        while True:
-            try:
-                res = requests.get(url, params={'market': m, 'count': 40}) # Fetch enough daily candles (some buffer)
-                if res.status_code == 429:
-                    print(f"  [429] Rate limit for {m}, retrying...")
-                    time.sleep(1)
-                    continue
-
-                data = res.json()
-                if isinstance(data, list):
-                    daily_cache[m] = data
-                    break
-                else:
-                    print(f"  Error fetching daily for {m}: {data}")
-                    time.sleep(1)
-            except Exception as e:
-                print(f"  Exception fetching daily for {m}: {e}")
-                time.sleep(1)
-        time.sleep(0.12)
-
-    print("  Processing...", end='', flush=True)
-    count = 0
-    total_steps = len(sim_ts)
-
-    for ts in sim_ts:
-        count += 1
-        if count % 2000 == 0:
-             print(f" {int(count/total_steps*100)}%...", end='', flush=True)
-
-        current_time = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S")
-
-        # Get candles for this minute from DB
-        market_data = db.get_candles_by_time(ts) # {market: candle_dict}
-        if not market_data: continue
-
-        current_prices = {m: c['trade_price'] for m, c in market_data.items()}
-
-        # 1. Check Orders
-        filled = account.check_orders(market_data)
-
-        # Process Grid Refills - REMOVED since Strategy is VB-Only now
-        # But keeping loop structure just in case.
-
-        # 2. Run Bots
-        for market, bot in bots.items():
-            if market not in current_prices: continue
-
-            candles = daily_cache[market]
-            cur_date_str = current_time.strftime("%Y-%m-%d")
-            start_idx = -1
-            for i, c in enumerate(candles):
-                if c['candle_date_time_kst'].startswith(cur_date_str):
-                    start_idx = i
-                    break
-
-            if start_idx != -1:
-                bot.run(current_prices[market], candles[start_idx:], current_time)
-
-    # Result
-    print(f"\n--- Backtest Result ---")
-
-    # Analyze Trades
-    trade_counts = {}
-    market_pnl = {} # {market: {'buys': 0, 'sells': 0}}
-
-    for t in account.trades_log:
-        m = t['market']
-        if m not in trade_counts: trade_counts[m] = 0
-        trade_counts[m] += 1
-
-        if m not in market_pnl: market_pnl[m] = {'buys': 0, 'sells': 0}
-
-        if t['side'] == 'bid':
-            market_pnl[m]['buys'] += t['total']
-        elif t['side'] == 'ask':
-            market_pnl[m]['sells'] += t['total']
-
-    print(f"Total Trades Executed: {len(account.trades_log)}")
-
-    est_total = account.balance
-    current_prices_last = {}
-
-    if sim_ts:
-        last_data = db.get_candles_by_time(sim_ts[-1])
-        for m, c in last_data.items():
-            current_prices_last[m] = c['trade_price']
-
-    print("\n[Market Performance]")
-    print(f"{'Market':<10} | {'Trades':<6} | {'Buy Total':<12} | {'Sell+Hold':<12} | {'PnL (KRW)':<10} | {'ROI':<7}")
-    print("-" * 75)
-
-    for m in STRATEGIES.keys():
-        # Get Current Holding Value
-        pos = account.positions.get(m, {'volume': 0})
-        cur_price = current_prices_last.get(m, 0)
-        hold_val = pos['volume'] * cur_price
-
-        est_total += hold_val # Add to Total Assets
-
-        # Stats
-        stats = market_pnl.get(m, {'buys': 0, 'sells': 0})
-        buys = stats['buys']
-        sells_plus_hold = stats['sells'] + hold_val
-        pnl = sells_plus_hold - buys
-
-        roi = 0.0
-        if buys > 0:
-            roi = (pnl / buys) * 100
-
-        t_count = trade_counts.get(m, 0)
-
-        print(f"{m:<10} | {t_count:<6} | {buys:12,.0f} | {sells_plus_hold:12,.0f} | {pnl:10,.0f} | {roi:6.2f}%")
-
-    initial = BACKTEST_INITIAL_BALANCE
-    pnl_pct = ((est_total - initial) / initial) * 100
-    print("-" * 75)
-    print(f"Final Balance: {account.balance:,.0f} KRW")
-    print(f"Estimated Total Assets: {est_total:,.0f} KRW")
-    print(f"Total Return (30 Days): {pnl_pct:.2f}%")
-
-    return pnl_pct
+    # Report
+    print(f"\nTotal Return: {((account.balance - BACKTEST_INITIAL_BALANCE)/BACKTEST_INITIAL_BALANCE)*100:.2f}%")
+    print(f"Trades: {len(account.trades_log)}")
+    for t in account.trades_log[-10:]:
+        print(t)
 
 if __name__ == "__main__":
-    calculate_past_month_profit()
+    # Test Run 2 days
+    run_backtest(days=2)
