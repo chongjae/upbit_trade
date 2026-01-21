@@ -190,6 +190,22 @@
             background-color: #8e44ad;
         }
 
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .chart-container {
+            margin-bottom: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            min-height: 300px;
+        }
+
         /* Mobile Optimization */
         @media (max-width: 768px) {
             body {
@@ -207,14 +223,43 @@
                 padding: 0;
             }
 
-            .stats-grid {
+            .dashboard-grid {
                 grid-template-columns: 1fr;
-                /* Stack vertically on mobile */
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+                /* 2 columns on mobile for better space usage */
+                gap: 10px;
             }
 
             .card {
                 padding: 15px;
-                /* Slightly less padding */
+            }
+
+            /* Fullscreen Modal on Mobile */
+            .modal-content {
+                width: 100%;
+                height: 100%;
+                margin: 0;
+                border: none;
+                border-radius: 0;
+            }
+
+            .close {
+                top: 15px;
+                right: 15px;
+                font-size: 36px;
+                /* Larger touch target */
+                color: #333;
+                /* Darker for better visibility against light theme */
+                background: rgba(255, 255, 255, 0.8);
+                /* Background to ensure visibility */
+                width: 40px;
+                height: 40px;
+                text-align: center;
+                line-height: 40px;
+                border-radius: 50%;
             }
         }
 
@@ -222,7 +267,39 @@
             width: 100%;
             overflow-x: auto;
             -webkit-overflow-scrolling: touch;
-            /* Smooth scrolling on iOS */
+        }
+
+        /* Tooltip Styles */
+        .tooltip {
+            position: relative;
+            display: inline-block;
+            border-bottom: 1px dotted #7f8c8d;
+            cursor: help;
+        }
+
+        .tooltip .tooltiptext {
+            visibility: hidden;
+            width: 250px;
+            background-color: #2c3e50;
+            color: #fff;
+            text-align: left;
+            border-radius: 6px;
+            padding: 10px;
+            position: absolute;
+            z-index: 1002;
+            bottom: 125%;
+            left: 0;
+            opacity: 0;
+            transition: opacity 0.3s;
+            font-size: 0.8rem;
+            font-weight: normal;
+            line-height: 1.5;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+        }
+
+        .tooltip:hover .tooltiptext {
+            visibility: visible;
+            opacity: 1;
         }
     </style>
 </head>
@@ -235,7 +312,7 @@
         </header>
 
         <!-- Summary -->
-        <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin-bottom: 20px;">
+        <div class="dashboard-grid">
             <!-- Stats -->
             <div class="card" style="margin-bottom: 0;">
                 <h2>Asset Summary</h2>
@@ -243,6 +320,18 @@
                     <div class="stat-item">
                         <div class="stat-label">Total Assets (Est.)</div>
                         <div class="stat-value">{{ "{:,.0f}".format(total_assets) }} KRW</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Total Profit</div>
+                        <div class="stat-value {{ 'pnl-pos' if total_profit >= 0 else 'pnl-neg' }}">
+                            {{ "{:+,.0f}".format(total_profit) }} KRW
+                        </div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Total ROI</div>
+                        <div class="stat-value {{ 'pnl-pos' if total_roi >= 0 else 'pnl-neg' }}">
+                            {{ "{:+.2f}%".format(total_roi) }}
+                        </div>
                     </div>
                     <div class="stat-item">
                         <div class="stat-label">Available KRW</div>
@@ -256,21 +345,10 @@
             </div>
 
             <!-- Chart -->
-            <div class="card"
-                style="margin-bottom: 0; display: flex; justify-content: center; align-items: center; position: relative;">
+            <div class="card chart-container">
                 <canvas id="assetChart"></canvas>
             </div>
         </div>
-
-        <!-- Mobile Hack: Force grid to stack on mobile via style block above or specific media query override if inline styles persist -->
-        <!-- Since I used inline style for grid, adding a specific style block for it -->
-        <style>
-            @media (max-width: 768px) {
-                div[style*="grid-template-columns: 2fr 1fr"] {
-                    grid-template-columns: 1fr !important;
-                }
-            }
-        </style>
 
         <!-- Strategy Status -->
         <div class="card">
@@ -282,9 +360,9 @@
                             <th>Market</th>
                             <th>Current Price</th>
                             <th>Target Price</th>
-                            <th>Strategy Mode</th>
+                            <th>Gap (%)</th>
+                            <th>Strategy (Status)</th>
                             <th>ADX</th>
-                            <th>Condition</th>
                             <th>Action</th>
                         </tr>
                     </thead>
@@ -305,37 +383,84 @@
                                 {% endif %}
                             </td>
                             <td>
-                                {% if status.mode %}
+                                {% if status.gap_pct is defined %}
                                 <span
-                                    style="background: #e8f6f3; color: #1abc9c; padding: 3px 8px; border-radius: 12px; font-size: 0.85rem; font-weight: bold;">
-                                    {{ status.mode }}
+                                    style="font-weight: bold; color: {{ '#e74c3c' if status.gap_pct > 0 else '#27ae60' }};">
+                                    {{ "{:+.2f}".format(status.gap_pct) }}%
                                 </span>
                                 {% else %}
-                                <span style="color: #95a5a6;">Wait</span>
+                                <span style="color: #95a5a6;">-</span>
                                 {% endif %}
+                            </td>
+                            <td>
+                                {% set mode_map = {
+                                'DYNAMIC': ('다이나믹', 'ADX 강도에 따라 추세(VB)와 박스권(CRSI/BB) 전략을 자동 전환합니다.'),
+                                'DYNAMIC_VB': ('다이나믹 (추세)', '현재 시장이 강한 추세 구간으로 판단되어 변동성 돌파 전략을 가동 중입니다.'),
+                                'RANGE_HYBRID': ('다이나믹 (횡보)', '현재 시장이 횡보 구간으로 판단되어 CRSI와 BB 복합 전략을 가동 중입니다.'),
+                                'TREND': ('추세 추종', '강한 상승 추세에서 변동성 돌파 전략을 사용하여 수익을 극대화합니다.'),
+                                'TREND_VB': ('추세 추종 (VB)', '강한 상승 추세에서 변동성 돌파 전략을 사용하여 수익을 극대화합니다.'),
+                                'RANGE': ('박스권', '횡보 시장에서 과매수/과매도 지표를 활용해 저점 매수 고점 매도를 수행합니다.'),
+                                'BB': ('볼린저 밴드', '볼린저 밴드 하단 이탈 시 매수, 중앙선 복귀 시 매도하는 전략입니다.'),
+                                'CRSI': ('코너스 RSI', 'RSI(2) 지표를 활용하여 단기 과매수/과매도 구간을 공략합니다.'),
+                                'MACD': ('MACD 발산', '주가와 MACD 지표 간의 다이버전스를 감지하여 반전 지점을 포착합니다.')
+                                } %}
+                                {% set cond_map = {
+                                'WAIT': ('분석 대기', '현재 시장 데이터를 수집하며 진입 기회를 포착하고 있습니다.'),
+                                'WAIT_DYNAMIC': ('다이나믹 대기', '시장 유동성과 강도를 분석하며 최적의 전략 전환 시점을 기다리고 있습니다.'),
+                                'WAIT_VB': ('돌파 대기', '가격이 목표 돌파가를 상향 돌파하기를 기다리고 있습니다.'),
+                                'WAIT_RSI': ('RSI 대기', 'Connors RSI 지표가 매수 기준치(5이하)로 내려오기를 기다리고 있습니다.'),
+                                'WAIT_BB': ('밴드 대기', '가격이 볼린저 밴드 하단에 도달하여 반등하기를 기다리고 있습니다.'),
+                                'PUMP_DETECTED': ('펌핑 주의', '비정상적인 거래량 폭증이 감지되어 위험 회피를 위해 매수를 제한합니다.'),
+                                'BEAR_TREND': ('하락장 대기', '장기 이평선 아래의 하락 추세 구간입니다. 리스크 관리를 위해 매수를 보류합니다.'),
+                                'MA5_BELOW': ('추세 확인 중', '목표가는 돌파했으나 5일 이평선 아래에 있어 추세 확정 시까지 대기합니다.'),
+                                'BUY_SIGNAL_VB': ('추세 매수', '변동성 돌파 조건이 충족되어 매수 신호가 발생했습니다.'),
+                                'BUY_MR': ('역추세 매수', '과매도 구간에서 기술적 반등을 노린 매수 신호가 발생했습니다.'),
+                                'BUY_DYN_CRSI': ('다이나믹 매수', '횡보장 전략(CRSI) 조건에 따라 매수 신호가 발생했습니다.'),
+                                'BUY_DYN_BB': ('다이나믹 매수', '횡보장 전략(BB) 조건에 따라 매수 신호가 발생했습니다.'),
+                                'BB_OVERSOLD_ZONE': ('과매도 구간', '가격이 밴드 하단 아래의 과매도 영역에 진입했습니다.'),
+                                'HOLDING': ('보유 중', '포지션을 유지하며 실시간으로 매도 조건을 감시하고 있습니다.'),
+                                'SELL_TS': ('수익 보존', '고점 대비 하락하여 트레일링 스탑 조건에 따라 매도합니다.'),
+                                'SELL_CRSI_EXIT': ('단기 익절', '단기 반등 목표치(MA5)에 도달하여 수익을 확정합니다.'),
+                                'SELL_BB_EXIT': ('평균 회귀', '볼린저 밴드 중앙선에 도달하여 포지션을 정리합니다.'),
+                                'WAIT_MOMENTUM': ('반전 대기', '하락세가 진정되고 상승 모멘텀이 발생하기를 기다리고 있습니다.'),
+                                'WAIT_PROFIT_MARGIN': ('수익폭 부족', '매수 기회는 발생했으나, 수수료 대비 기대 수익이 낮아 진입하지 않습니다.')
+                                } %}
+
+                                <div class="tooltip">
+                                    <span
+                                        style="background: #e8f6f3; color: #1abc9c; padding: 3px 8px; border-radius: 12px; font-size: 0.85rem; font-weight: bold;">
+                                        {{ (mode_map[status.mode][0] if status.mode in mode_map else status.mode) or
+                                        '대기' }}
+                                        ({{ (cond_map[status.condition][0] if status.condition in cond_map else
+                                        status.condition) or '분석 중' }})
+                                    </span>
+                                    <span class="tooltiptext">
+                                        <strong>전략:</strong> {{ (mode_map[status.mode][1] if status.mode in mode_map
+                                        else '등록되지 않은 전략입니다.') }}<br>
+                                        <strong>상태:</strong> {{ (cond_map[status.condition][1] if status.condition in
+                                        cond_map else '현재 시장 상황을 분석하고 있습니다.') }}
+                                    </span>
+                                </div>
                             </td>
                             <td>
                                 {% if status.adx %}
                                 {{ "{:.1f}".format(status.adx) }}
                                 {% if status.adx >= 25 %}
-                                <span style="font-size: 0.8rem; color: #e67e22;">(Trend)</span>
+                                <span style="font-size: 0.8rem; color: #e67e22;">(추세)</span>
                                 {% else %}
-                                <span style="font-size: 0.8rem; color: #3498db;">(Range)</span>
+                                <span style="font-size: 0.8rem; color: #3498db;">(횡보)</span>
                                 {% endif %}
                                 {% else %}
                                 -
                                 {% endif %}
                             </td>
-                            <td style="font-size: 0.9rem; color: #7f8c8d;">
-                                {{ status.condition }}
-                            </td>
                             <td>
-                                {% if 'BUY' in status.condition %}
-                                <span class="side-bid">BUY SIGNAL</span>
+                                {% if 'BUY' in status.condition or 'SIGNAL' in status.condition %}
+                                <span class="side-bid">매수 신호</span>
                                 {% elif 'SELL' in status.condition %}
-                                <span class="side-ask">SELL SIGNAL</span>
+                                <span class="side-ask">매수 신호</span>
                                 {% else %}
-                                <span style="color: #bdc3c7;">Waiting</span>
+                                <span style="color: #bdc3c7;">대기 중</span>
                                 {% endif %}
                             </td>
                         </tr>
@@ -565,6 +690,10 @@
             colors.push(coinColors[index % coinColors.length]);
         });
 
+        function getLegendPosition() {
+            return window.innerWidth < 768 ? 'bottom' : 'right';
+        }
+
         const assetChart = new Chart(ctx, {
             type: 'doughnut',
             data: {
@@ -580,7 +709,7 @@
                 maintainAspectRatio: false,
                 plugins: {
                     legend: {
-                        position: 'right',
+                        position: getLegendPosition(),
                         labels: { boxWidth: 12 }
                     },
                     title: {
@@ -588,6 +717,15 @@
                         text: 'Asset Allocation'
                     }
                 }
+            }
+        });
+
+        // Responsive Legend Update
+        window.addEventListener('resize', () => {
+            const newPos = getLegendPosition();
+            if (assetChart.options.plugins.legend.position !== newPos) {
+                assetChart.options.plugins.legend.position = newPos;
+                assetChart.update();
             }
         });
 

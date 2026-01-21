@@ -302,10 +302,19 @@ def index():
     # Sort by Total PnL descending
     performance.sort(key=lambda x: x['total_pnl'], reverse=True)
 
+    # Calculate Total Profit (Sum of Realized + Unrealized PnL from all markets)
+    total_profit = sum(m['total_pnl'] for m in performance)
+
+    # Starting Equity = Total Assets - Total Profit
+    starting_equity = total_assets - total_profit
+    total_roi = (total_profit / starting_equity) * 100 if starting_equity > 0 else 0
+
     return render_template('index.html',
                            balance=balance,
                            locked_funds=locked_funds,
                            total_assets=total_assets,
+                           total_profit=total_profit,
+                           total_roi=total_roi,
                            holdings=holdings,
                            trades=trades,
                            open_orders=open_orders,
